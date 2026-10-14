@@ -1,0 +1,46 @@
+{
+  "variables": [
+    {
+      "name": "EGATE_ADMIN_USERNAME",
+      "description": "Username for the administrator sign-in.",
+      "example": "admin",
+      "required": true
+    },
+    {
+      "name": "EGATE_ADMIN_PASSWORD",
+      "description": "Password for the administrator sign-in; use a long unique value.",
+      "example": "replace-with-a-long-random-password",
+      "required": true
+    },
+    {
+      "name": "EGATE_RESEND_API_KEY",
+      "description": "Resend API key used to send email.",
+      "example": "re_your_resend_api_key",
+      "required": true
+    },
+    {
+      "name": "EGATE_DB",
+      "description": "SQLite database path. Keep the Uppr database at ./data/main.sqlite.",
+      "example": "./data/main.sqlite",
+      "required": false
+    },
+    {
+      "name": "EGATE_HOST",
+      "description": "Network interface to listen on. Use 0.0.0.0 in Uppr.",
+      "example": "0.0.0.0",
+      "required": false
+    },
+    {
+      "name": "EGATE_PORT",
+      "description": "HTTP listen port; keep 8119 in Uppr to match Docker EXPOSE.",
+      "example": "8119",
+      "required": false
+    },
+    {
+      "name": "EGATE_LOGIN_MAX_ATTEMPTS",
+      "description": "Failed administrator logins allowed per IP in a rolling 24 hour window.",
+      "example": "5",
+      "required": false
+    }
+  ]
+}

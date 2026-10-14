@@ -1,0 +1,48 @@
+{{define "docs.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="egate API documentation — send transactional email through a small, self-hosted HTTP gateway.">
+  <title>egate — API documentation</title>
+  <style>{{template "style"}}</style>
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="/" aria-label="egate documentation home"><span class="brand-mark">e</span>egate</a><nav aria-label="Documentation"><a href="#quickstart">Quickstart</a><a href="#api">API</a><a href="#sdk">Go SDK</a><a href="#operations">Operations</a><a href="/login">Admin sign in</a></nav></header>
+  <main class="docs">
+    <section class="hero"><p class="eyebrow">Self-hosted email infrastructure</p><h1>One endpoint between<br>your apps and email.</h1><p class="lede">egate is a focused application-to-application email gateway backed by SQLite and Resend. Sign in to register apps, issue a secret connection key for each app, and send transactional email over a small HTTP API.</p><div class="hero-actions"><a class="button" href="/login">Register an app</a><a class="text-link" href="#sdk">Use the Go SDK <span aria-hidden="true">→</span></a></div></section>
+
+    <section class="features" aria-label="Key features"><article><span class="feature-number">01</span><h2>Small surface area</h2><p>One authenticated email endpoint, one health check, and no unnecessary runtime dependencies.</p></article><article><span class="feature-number">02</span><h2>Apps you control</h2><p>Register each calling app to get its own key. Revoke an app without rotating your Resend API key.</p></article><article><span class="feature-number">03</span><h2>Simple operations</h2><p>A single Go binary, a SQLite database, and a Docker workflow with persistent local storage.</p></article></section>
+
+    <section id="quickstart" class="doc-section"><div class="section-intro"><p class="eyebrow">Quickstart</p><h2>Send an email</h2><p>First register an app in the admin dashboard and copy its key. Then send a JSON request to egate with the key in the bearer authorization header.</p></div><div class="code-block"><div class="code-label">Shell</div><pre><code>curl https://egate.example.com/v1/email \
+  -H 'Authorization: Bearer eg_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "from": "sender@example.com",
+    "to": "recipient@example.com",
+    "subject": "Hello from egate",
+    "text_body": "Your transactional email is ready."
+  }'</code></pre></div></section>
+
+    <section id="api" class="doc-section"><div class="section-intro"><p class="eyebrow">HTTP API</p><h2><span class="method">POST</span> /v1/email</h2><p>Submits a message to Resend. egate passes the provider response body and HTTP status through unchanged.</p></div><div class="reference"><h3>Headers</h3><div class="field"><code>Authorization</code><span>required</span><p><code>Bearer eg_YOUR_KEY</code></p></div><div class="field"><code>Content-Type</code><span>required</span><p><code>application/json</code></p></div><h3>JSON body</h3><div class="field"><code>from</code><span>string · required</span><p>Sender address accepted by your Resend account.</p></div><div class="field"><code>to</code><span>string · required</span><p>Recipient address.</p></div><div class="field"><code>subject</code><span>string · required</span><p>Message subject.</p></div><div class="field"><code>text_body</code><span>string</span><p>Plain-text body. At least one of <code>text_body</code> or <code>html_body</code> is required.</p></div><div class="field"><code>html_body</code><span>string</span><p>HTML message body.</p></div><div class="field"><code>reply_to</code><span>string · optional</span><p>Address used for recipient replies.</p></div><h3>Responses</h3><div class="field"><code>2xx</code><p>Resend accepted the request. The exact provider status and JSON response are returned.</p></div><div class="field"><code>400</code><p>The JSON is invalid or a required field is missing.</p></div><div class="field"><code>401</code><p>The bearer token is missing, invalid, or revoked.</p></div><div class="field"><code>502</code><p>The email provider could not be reached.</p></div></div></section>
+
+    <section id="sdk" class="doc-section"><div class="section-intro"><p class="eyebrow">Go SDK</p><h2>Use egate from Go</h2><p>Install the module, construct a client with your deployment URL and API key, then send a typed message.</p></div><div><div class="code-block"><div class="code-label">Install</div><pre><code>go get github.com/englandsystems/egate</code></pre></div><div class="code-block"><div class="code-label">Go</div><pre><code>client, err := sdk.NewClient(
+  "https://egate.example.com",
+  os.Getenv("EGATE_API_KEY"),
+)
+if err != nil {
+  log.Fatal(err)
+}
+
+response, err := client.SendEmail(ctx, sdk.Email{
+  From:     "sender@example.com",
+  To:       "recipient@example.com",
+  Subject:  "Hello from egate",
+  TextBody: "Your transactional email is ready.",
+})</code></pre></div></div></section>
+
+    <section id="operations" class="doc-section"><div class="section-intro"><p class="eyebrow">Operations</p><h2>Run it reliably</h2><p>egate is designed to sit behind a TLS reverse proxy. Persist its SQLite data directory and keep credentials outside the image.</p></div><div class="reference"><h3>Health check</h3><div class="field"><code>GET /healthz</code><p>Returns <code>{"ok":true}</code> with status 200 when the process can serve traffic.</p></div><h3>Limits and behavior</h3><div class="field"><code>Request size</code><p>Email request bodies are limited to 1 MiB.</p></div><div class="field"><code>Timeouts</code><p>Provider requests time out after 15 seconds.</p></div><div class="field"><code>Persistence</code><p>Registered apps, keys, sessions, and security records live in the configured SQLite database.</p></div><div class="field"><code>Transport security</code><p>Terminate TLS at a reverse proxy and restrict direct access to the application port in production.</p></div></div></section>
+  </main>
+  <footer><a class="brand" href="/"><span class="brand-mark">e</span>egate</a><p>Small, controlled email infrastructure.</p></footer>
+</body>
+</html>{{end}}
