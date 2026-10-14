@@ -26,7 +26,7 @@ func TestHelpIsClearAndActionable(t *testing.T) {
 		"egate teach ./EGATE.md",
 		"By default, read process environment",
 		"EGATE_RESEND_API_KEY",
-		"http://127.0.0.1:8119/login",
+		"http://127.0.0.1:8119 in a browser",
 		"Authorization: Bearer eg_YOUR_KEY",
 	} {
 		if !strings.Contains(help, want) {
@@ -228,21 +228,35 @@ func TestLoginCookieIsSecureBehindTLSProxy(t *testing.T) {
 	}
 }
 
-func TestPublicDocumentationAtRoot(t *testing.T) {
+func TestRootLeadsToAdmin(t *testing.T) {
 	a := testApp(t, 5)
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	a.routes().ServeHTTP(w, r)
 
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/admin" {
+		t.Fatalf("status = %d, location = %q", w.Code, w.Header().Get("Location"))
+	}
+}
+
+func TestAdminShowsConnectionURLs(t *testing.T) {
+	a := testApp(t, 5)
+	rawSession, csrf := token(32), token(24)
+	if _, err := a.db.Exec(`INSERT INTO sessions(token_hash,csrf_token,expires_at) VALUES(?,?,?)`, hash(rawSession), csrf, time.Now().Add(time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "http://egate.example.com/admin", nil)
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.AddCookie(&http.Cookie{Name: "egate_session", Value: rawSession})
+	w := httptest.NewRecorder()
+	a.routes().ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	body := w.Body.String()
-	if !strings.Contains(body, "API documentation") || !strings.Contains(body, "POST</span> /v1/email") {
-		t.Fatalf("root did not render API documentation: %s", body)
-	}
-	if !strings.Contains(body, `href="/login"`) {
-		t.Fatal("public documentation has no admin sign-in link")
+	for _, want := range []string{"Host (EGATE_HOST)", "https://egate.example.com", "POST https://egate.example.com/v1/email", "EGATE_API_KEY"} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("admin page is missing %q", want)
+		}
 	}
 }
 
@@ -315,6 +329,9 @@ func TestRegisterAppAndRevokeKey(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "eg_") || strings.Contains(w.Body.String(), keyHash) {
 		t.Fatal("registration did not show a raw key safely")
+	}
+	if !strings.Contains(w.Body.String(), "POST http://example.com/v1/email") {
+		t.Fatal("registration response did not show the email endpoint with the new key")
 	}
 	revoke := httptest.NewRequest("POST", "/apps/"+strconv.FormatInt(id, 10)+"/revoke", strings.NewReader(url.Values{"csrf": {csrf}}.Encode()))
 	revoke.Header.Set("Content-Type", "application/x-www-form-urlencoded")

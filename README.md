@@ -16,7 +16,7 @@ Edit `config/.env`: replace the starter administrator password and invalid Resen
 go run . --env config/.env
 ```
 
-Open `http://127.0.0.1:8119` for API documentation, or `/login` to sign in and register apps at `/admin`. The app creates `data/main.sqlite` and its tables on startup. It also synchronizes the configured admin username and password into the database on every startup, so update `config/.env` to rotate them.
+Open `http://127.0.0.1:8119` to sign in and register apps at `/admin`. The admin page shows the gateway host and complete email endpoint alongside app keys. The app creates `data/main.sqlite` and its tables on startup. It also synchronizes the configured admin username and password into the database on every startup, so update `config/.env` to rotate them.
 
 The service reads process environment by default. For local runs, `--env PATH` loads a file. `schema.json` lists all supported settings. The default port is `8119`; the default bind address is `0.0.0.0`. Set `EGATE_HOST=127.0.0.1` in `config/.env` if a local run should accept only local connections.
 
@@ -64,7 +64,7 @@ _, err = client.SendEmail(context.Background(), sdk.Email{
 })
 ```
 
-The SDK’s `EGATE_API_KEY` and gateway URL belong to the **calling application**; they are not settings for the egate server. The repo includes [EGATE.md](EGATE.md), a guide for an LLM or developer integrating egate into another app. Run `egate teach ./EGATE.md` in that app to copy the guide from the current binary; repeating the command updates it.
+The SDK’s `EGATE_API_KEY` and gateway URL belong to the **calling application**; they are not settings for the egate server. In the calling app, `EGATE_HOST` is the base URL shown in the admin page. On the egate server, the setting with the same name controls the listen address. The repo includes [EGATE.md](EGATE.md), a guide for an LLM or developer integrating egate into another app. Run `egate teach ./EGATE.md` in that app to copy the guide from the current binary; repeating the command updates it.
 
 ## Provider migration
 

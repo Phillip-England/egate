@@ -52,6 +52,7 @@ type appView struct {
 }
 type pageData struct {
 	Error, Message, NewKey, CSRF string
+	BaseURL, EmailEndpoint       string
 	Apps                         []appView
 }
 
@@ -142,8 +143,8 @@ QUICK START
   3. Start the server with the local file:
        egate --env config/.env
 
-  4. Open http://127.0.0.1:8119 in a browser for API documentation.
-     Sign in at http://127.0.0.1:8119/login to register apps and get their keys.
+  4. Open http://127.0.0.1:8119 in a browser to sign in, register apps,
+     and find their keys and email endpoint.
 
 TEACH AN AGENT
   Write the egate integration guide into another repository:
@@ -317,7 +318,9 @@ func (a *app) routes() http.Handler {
 	m.HandleFunc("GET /login", a.loginPage)
 	m.HandleFunc("POST /login", a.login)
 	m.HandleFunc("POST /logout", a.requireAdmin(a.logout))
-	m.HandleFunc("GET /", a.docsPage)
+	m.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	})
 	m.HandleFunc("GET /admin", a.requireAdmin(a.dashboard))
 	m.HandleFunc("POST /apps", a.requireAdmin(a.createApp))
 	m.HandleFunc("POST /apps/{id}/revoke", a.requireAdmin(a.revokeApp))
@@ -362,8 +365,13 @@ func (a *app) cleanup() {
 func (a *app) loginPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "login.html", pageData{})
 }
-func (a *app) docsPage(w http.ResponseWriter, r *http.Request) {
-	a.render(w, "docs.html", pageData{})
+func gatewayURLs(r *http.Request) (string, string) {
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	base := scheme + "://" + r.Host
+	return base, base + "/v1/email"
 }
 func (a *app) login(w http.ResponseWriter, r *http.Request) {
 	a.cleanup()
@@ -442,7 +450,8 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	d := pageData{CSRF: csrf}
+	base, endpoint := gatewayURLs(r)
+	d := pageData{CSRF: csrf, BaseURL: base, EmailEndpoint: endpoint}
 	for rows.Next() {
 		var k appView
 		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.Created); err != nil {
@@ -471,7 +480,8 @@ func (a *app) createApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	csrf, _ := a.session(r)
-	d := pageData{CSRF: csrf, NewKey: raw, Message: "Copy this app key now. It cannot be shown again."}
+	base, endpoint := gatewayURLs(r)
+	d := pageData{CSRF: csrf, BaseURL: base, EmailEndpoint: endpoint, NewKey: raw, Message: "Copy this app key now. It cannot be shown again."}
 	rows, err := a.db.Query(`SELECT id,name,prefix,datetime(created_at,'unixepoch') FROM apps WHERE revoked_at IS NULL ORDER BY id DESC`)
 	if err != nil {
 		http.Error(w, "database error", 500)
