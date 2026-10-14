@@ -51,7 +51,7 @@ The gateway passes through Resend’s HTTP status and response body. Five failed
 
 ## Agent integration guide
 
-In the calling application's directory, run `egate teach https://egate.englandsoftware.com` (or use your own gateway URL). This creates or replaces `./EGATE.md` with the host, endpoint, authentication, request format, response handling, and integration instructions. The calling application still needs its own `EGATE_API_KEY` from a registered app. It sends mail with a normal HTTP client; no egate SDK is required.
+In the calling application's directory, run `egate teach https://egate.englandsoftware.com noreply@englandsoftware.com` (or use your own gateway URL and sender address). The sender address must be on a domain verified in the gateway's Resend account. This creates or replaces `./EGATE.md` with the host, sender, endpoint, authentication, request format, response handling, and integration instructions. The calling application still needs its own `EGATE_API_KEY` from a registered app. It sends mail with a normal HTTP client; no egate SDK is required.
 
 The calling application's `EGATE_HOST` is the gateway's base URL. On the egate server, the setting with the same name controls the listen address. The repository's [EGATE.md](EGATE.md) is the guide template embedded in the egate binary.
 

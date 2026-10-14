@@ -23,7 +23,7 @@ func TestHelpIsClearAndActionable(t *testing.T) {
 	help := out.String()
 	for _, want := range []string{
 		"egate --init-env config/.env",
-		"egate teach https://egate.example.com",
+		"egate teach https://egate.example.com noreply@example.com",
 		"writes ./EGATE.md",
 		"By default, read process environment",
 		"EGATE_RESEND_API_KEY",
@@ -39,7 +39,8 @@ func TestHelpIsClearAndActionable(t *testing.T) {
 func TestTeachWritesAgentGuide(t *testing.T) {
 	t.Chdir(t.TempDir())
 	host := "https://egate.englandsoftware.com"
-	if err := teach(host + "/"); err != nil {
+	sender := "noreply@englandsoftware.com"
+	if err := teach(host+"/", sender); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile("EGATE.md")
@@ -50,6 +51,9 @@ func TestTeachWritesAgentGuide(t *testing.T) {
 	for _, want := range []string{
 		"POST " + host + "/v1/email",
 		"EGATE_HOST=" + host,
+		"Sender email: `" + sender + "`",
+		"\"from\": \"" + sender + "\"",
+		"Set the `from` field to `" + sender + "`",
 		"EGATE_API_KEY",
 		"Authorization: Bearer <EGATE_API_KEY>",
 		"text_body",
@@ -61,14 +65,14 @@ func TestTeachWritesAgentGuide(t *testing.T) {
 			t.Errorf("guide is missing %q", want)
 		}
 	}
-	if strings.Contains(guide, "{EGATE_HOST}") || strings.Contains(guide, "github.com/englandsystems/egate/sdk") {
-		t.Fatal("guide contains an unresolved host or SDK dependency")
+	if strings.Contains(guide, "{EGATE_HOST}") || strings.Contains(guide, "{EGATE_SENDER_EMAIL}") || strings.Contains(guide, "github.com/englandsystems/egate/sdk") {
+		t.Fatal("guide contains an unresolved placeholder or SDK dependency")
 	}
 
 	if err := os.WriteFile("EGATE.md", []byte("stale"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := teach(host); err != nil {
+	if err := teach(host, sender); err != nil {
 		t.Fatal(err)
 	}
 	b, err = os.ReadFile("EGATE.md")
@@ -83,12 +87,24 @@ func TestTeachWritesAgentGuide(t *testing.T) {
 func TestTeachRejectsInvalidHostWithoutWriting(t *testing.T) {
 	t.Chdir(t.TempDir())
 	for _, host := range []string{"", "egate.example.com", "ftp://egate.example.com", "https://egate.example.com/v1/email", "https://egate.example.com?key=secret", "https://user:pass@egate.example.com"} {
-		if err := teach(host); err == nil {
+		if err := teach(host, "noreply@example.com"); err == nil {
 			t.Errorf("teach accepted invalid host %q", host)
 		}
 	}
 	if _, err := os.Stat("EGATE.md"); !os.IsNotExist(err) {
 		t.Fatalf("invalid host created EGATE.md: %v", err)
+	}
+}
+
+func TestTeachRejectsInvalidSenderWithoutWriting(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, sender := range []string{"", "noreply", "Example <noreply@example.com>", "first@example.com, second@example.com", "noreply@example.com\nInjected: value"} {
+		if err := teach("https://egate.example.com", sender); err == nil {
+			t.Errorf("teach accepted invalid sender %q", sender)
+		}
+	}
+	if _, err := os.Stat("EGATE.md"); !os.IsNotExist(err) {
+		t.Fatalf("invalid sender created EGATE.md: %v", err)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -59,11 +60,11 @@ type pageData struct {
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "teach" {
-		if len(os.Args) != 3 {
-			fmt.Fprintln(os.Stderr, "usage: egate teach HOST_URL")
+		if len(os.Args) != 4 {
+			fmt.Fprintln(os.Stderr, "usage: egate teach HOST_URL SENDER_EMAIL")
 			os.Exit(2)
 		}
-		if err := teach(os.Args[2]); err != nil {
+		if err := teach(os.Args[2], os.Args[3]); err != nil {
 			log.Fatal(err)
 		}
 		log.Printf("wrote egate integration guide to ./EGATE.md")
@@ -131,7 +132,7 @@ func printHelp(w io.Writer) {
 
 USAGE
   egate help
-  egate teach HOST_URL
+  egate teach HOST_URL SENDER_EMAIL
   egate --init-env PATH
   egate --env PATH
 
@@ -149,10 +150,11 @@ QUICK START
 
 TEACH AN AGENT
   Write the egate integration guide into the current directory:
-       egate teach https://egate.example.com
+       egate teach https://egate.example.com noreply@example.com
 
-  The command requires the gateway's base URL and writes ./EGATE.md. Running
-  it again replaces the file. The calling app also needs its own EGATE_API_KEY.
+  The command requires the gateway's base URL and a sender email on a domain
+  verified in Resend. It writes ./EGATE.md; running it again replaces the file.
+  The calling app also needs its own EGATE_API_KEY.
 
 OPTIONS
   --init-env PATH  Create a starter environment file and exit.
@@ -185,13 +187,18 @@ NOTES
 `)
 }
 
-func teach(host string) error {
+func teach(host, sender string) error {
 	u, err := url.Parse(host)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("host must be an absolute http or https base URL without a path, query, or fragment")
 	}
+	address, err := mail.ParseAddress(sender)
+	if err != nil || address.Address != sender {
+		return errors.New("sender must be a single email address without a display name")
+	}
 	host = strings.TrimRight(u.String(), "/")
 	guide := strings.ReplaceAll(agentGuide, "{EGATE_HOST}", host)
+	guide = strings.ReplaceAll(guide, "{EGATE_SENDER_EMAIL}", sender)
 	if err := os.WriteFile("EGATE.md", []byte(guide), 0644); err != nil {
 		return fmt.Errorf("write EGATE.md: %w", err)
 	}
