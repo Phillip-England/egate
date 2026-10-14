@@ -1,22 +1,42 @@
-# Integrate an application with egate
+# Connect this application to egate
 
-Use egate as the email gateway for this application. egate sends through Resend. The calling application talks only to egate and never needs the Resend API key.
+egate is an HTTP email gateway. Use the HTTP API directly with your application's existing HTTP client; no egate SDK or package is required. The gateway sends through Resend, so the calling application does not need a Resend API key.
 
-## Obtain and store credentials
+## Gateway and credentials
 
-1. An egate administrator signs in at `{EGATE_HOST}/login` and registers this application under **Apps**.
-2. Copy the generated app key immediately. egate shows it only once. If it is lost, revoke the app and register a replacement.
-3. Set `EGATE_HOST` to the absolute base URL of the egate deployment, such as `https://egate.example.com`. Do not append `/v1/email`.
-4. Set `EGATE_API_KEY` to the generated `eg_...` app key. Keep it in server-side secret storage. Never commit, log, or expose it to browser code.
+- Gateway base URL: `{EGATE_HOST}`
+- Email endpoint: `POST {EGATE_HOST}/v1/email`
+- Health check: `GET {EGATE_HOST}/healthz`
 
-These two variables are for the **calling application**. The egate server is separately configured with `EGATE_RESEND_API_KEY` and an admin login.
+An egate administrator signs in at `{EGATE_HOST}/login`, registers this application under **Apps**, and gives you its `eg_...` app key. The key is displayed only once. If it is lost or revoked, register a replacement app and update the calling application's secret.
 
-## HTTP contract
+Set `EGATE_HOST={EGATE_HOST}` in the calling application's server-side configuration and set `EGATE_API_KEY` to its registered app key in server-side secret storage. The host is supplied by this guide; the key must still be established for this application. Never commit, log, or expose the key to browser code. These variables belong to the calling application. On the egate server, `EGATE_HOST` is a separate setting for its listen address.
 
-Send `POST {EGATE_HOST}/v1/email` with `Authorization: Bearer {EGATE_API_KEY}` and `Content-Type: application/json`.
+## Send an email
+
+Make an HTTP `POST` request to `{EGATE_HOST}/v1/email` with these headers:
+
+```http
+Authorization: Bearer <EGATE_API_KEY>
+Content-Type: application/json
+Accept: application/json
+```
+
+The JSON object has these fields:
+
+| Field | Requirement | Meaning |
+| --- | --- | --- |
+| `from` | Required, nonempty string | Sender address, optionally with a display name; its address or domain must be allowed by the gateway's Resend account. |
+| `to` | Required, nonempty string | One recipient address per request. |
+| `subject` | Required, nonempty string | Email subject. |
+| `text_body` | At least one body required | Plain text content. |
+| `html_body` | At least one body required | HTML content. Supply both body formats when possible. |
+| `reply_to` | Optional string | Reply address. |
+
+Example request using the configured key:
 
 ```sh
-curl "$EGATE_HOST/v1/email" \
+curl '{EGATE_HOST}/v1/email' \
   -H "Authorization: Bearer $EGATE_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -29,52 +49,8 @@ curl "$EGATE_HOST/v1/email" \
   }'
 ```
 
-`from`, `to`, and `subject` are required nonempty strings. Supply at least one of `text_body` and `html_body`; both are useful for accessibility. `reply_to` is optional. This gateway accepts one recipient string per request. The `from` address or domain must be allowed by the egate server's Resend account.
-
-A successful send returns Resend's HTTP status and JSON response, typically an object with an `id`. An invalid request returns 400; a missing, invalid, or revoked app key returns 401; an unavailable Resend API returns 502. Other Resend error status codes and bodies pass through. Handle non-2xx responses without showing raw provider errors to end users. Set an application timeout and avoid blind retries, since an uncertain failure can result in duplicate email.
-
-## Go integration
-
-For Go applications, use the egate SDK:
-
-```sh
-go get github.com/englandsystems/egate
-```
-
-```go
-package notifications
-
-import (
-    "context"
-    "fmt"
-    "os"
-
-    "github.com/englandsystems/egate/sdk"
-)
-
-func SendWelcome(ctx context.Context, recipient string) error {
-    client, err := sdk.NewClient(os.Getenv("EGATE_HOST"), os.Getenv("EGATE_API_KEY"))
-    if err != nil {
-        return fmt.Errorf("configure egate: %w", err)
-    }
-    _, err = client.SendEmail(ctx, sdk.Email{
-        From: "Example Team <mail@example.com>",
-        To: recipient,
-        Subject: "Welcome",
-        TextBody: "Welcome to Example.",
-        HTMLBody: "<p>Welcome to Example.</p>",
-    })
-    if err != nil {
-        return fmt.Errorf("send welcome email: %w", err)
-    }
-    return nil
-}
-```
-
-`SendEmail` returns `(*sdk.Response, error)`. For a non-2xx response, the error is `*sdk.APIError` and the response still contains the status, headers, and body. Transport failures can return no response. The SDK has a 15-second HTTP timeout by default; `SetHTTPClient` accepts a custom `*http.Client`. Pass request context through from HTTP handlers.
+The gateway accepts one JSON object per request, with a maximum request body of 1 MiB. It returns the email provider's HTTP status and JSON body on a successful provider request, typically including an `id`. An invalid JSON body or missing required field returns `400`; a missing, invalid, or revoked app key returns `401`; a provider connection failure returns `502`. Other provider error statuses and bodies pass through. Treat every non-2xx status as a failed send. Do not show raw provider errors to end users. Set a request timeout and avoid automatic retries after an uncertain result, which could duplicate an email.
 
 ## Instructions for a coding assistant
 
-When integrating egate into another repository, inspect that application's existing email and configuration paths. Add `EGATE_HOST` and `EGATE_API_KEY` to its server-side configuration, use the SDK for Go or the HTTP contract for other languages, and route the application's email events through egate. Preserve its existing email content and error handling requirements. Keep credentials out of source control and client-side bundles. Use mock transports or a local test server for tests; never send real mail from tests. Do not call Resend directly from the calling application.
-
-The egate administrator can revoke an app from the Apps page, which immediately makes its key unusable. Register a replacement app to rotate a key.
+Inspect the application's existing email events and configuration. Add `EGATE_API_KEY` as a server-side secret and set `EGATE_HOST` to the base URL above. Send each email using the application's standard HTTP client and the contract in this document. Preserve the existing email content and error handling expectations. Keep credentials out of source control and client bundles. Test against a mock HTTP server rather than sending real mail. Route the application's email through egate instead of calling Resend directly.

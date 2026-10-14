@@ -23,7 +23,8 @@ func TestHelpIsClearAndActionable(t *testing.T) {
 	help := out.String()
 	for _, want := range []string{
 		"egate --init-env config/.env",
-		"egate teach ./EGATE.md",
+		"egate teach https://egate.example.com",
+		"writes ./EGATE.md",
 		"By default, read process environment",
 		"EGATE_RESEND_API_KEY",
 		"http://127.0.0.1:8119 in a browser",
@@ -36,41 +37,58 @@ func TestHelpIsClearAndActionable(t *testing.T) {
 }
 
 func TestTeachWritesAgentGuide(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "EGATE.md")
-	if err := teach(path); err != nil {
+	t.Chdir(t.TempDir())
+	host := "https://egate.englandsoftware.com"
+	if err := teach(host + "/"); err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile("EGATE.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	guide := string(b)
 	for _, want := range []string{
-		"github.com/englandsystems/egate/sdk",
-		"EGATE_HOST",
+		"POST " + host + "/v1/email",
+		"EGATE_HOST=" + host,
 		"EGATE_API_KEY",
-		"sdk.NewClient",
-		"client.SendEmail",
-		"*sdk.APIError",
-		"POST {EGATE_HOST}/v1/email",
+		"Authorization: Bearer <EGATE_API_KEY>",
+		"text_body",
+		"html_body",
+		"401",
+		"502",
 	} {
 		if !strings.Contains(guide, want) {
 			t.Errorf("guide is missing %q", want)
 		}
 	}
+	if strings.Contains(guide, "{EGATE_HOST}") || strings.Contains(guide, "github.com/englandsystems/egate/sdk") {
+		t.Fatal("guide contains an unresolved host or SDK dependency")
+	}
 
-	if err := os.WriteFile(path, []byte("stale"), 0644); err != nil {
+	if err := os.WriteFile("EGATE.md", []byte("stale"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := teach(path); err != nil {
+	if err := teach(host); err != nil {
 		t.Fatal(err)
 	}
-	b, err = os.ReadFile(path)
+	b, err = os.ReadFile("EGATE.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(b) != sdkGuide {
+	if string(b) != guide {
 		t.Fatal("teach did not replace an existing guide")
+	}
+}
+
+func TestTeachRejectsInvalidHostWithoutWriting(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, host := range []string{"", "egate.example.com", "ftp://egate.example.com", "https://egate.example.com/v1/email", "https://egate.example.com?key=secret", "https://user:pass@egate.example.com"} {
+		if err := teach(host); err == nil {
+			t.Errorf("teach accepted invalid host %q", host)
+		}
+	}
+	if _, err := os.Stat("EGATE.md"); !os.IsNotExist(err) {
+		t.Fatalf("invalid host created EGATE.md: %v", err)
 	}
 }
 

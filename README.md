@@ -49,22 +49,11 @@ curl http://127.0.0.1:8119/v1/email \
 
 The gateway passes through Resend’s HTTP status and response body. Five failed administrator logins from one IP in a rolling 24 hour window cause a 24 hour ban by default; `EGATE_LOGIN_MAX_ATTEMPTS` changes the threshold.
 
-## Go SDK and agent guide
+## Agent integration guide
 
-Install `github.com/englandsystems/egate` and import `github.com/englandsystems/egate/sdk`. Supply the gateway URL and the registered app key to the SDK:
+In the calling application's directory, run `egate teach https://egate.englandsoftware.com` (or use your own gateway URL). This creates or replaces `./EGATE.md` with the host, endpoint, authentication, request format, response handling, and integration instructions. The calling application still needs its own `EGATE_API_KEY` from a registered app. It sends mail with a normal HTTP client; no egate SDK is required.
 
-```go
-client, err := sdk.NewClient("https://egate.example.com", os.Getenv("EGATE_API_KEY"))
-if err != nil {
-    log.Fatal(err)
-}
-_, err = client.SendEmail(context.Background(), sdk.Email{
-    From: "sender@example.com", To: "recipient@example.com",
-    Subject: "Hello", TextBody: "Sent through egate",
-})
-```
-
-The SDK’s `EGATE_API_KEY` and gateway URL belong to the **calling application**; they are not settings for the egate server. In the calling app, `EGATE_HOST` is the base URL shown in the admin page. On the egate server, the setting with the same name controls the listen address. The repo includes [EGATE.md](EGATE.md), a guide for an LLM or developer integrating egate into another app. Run `egate teach ./EGATE.md` in that app to copy the guide from the current binary; repeating the command updates it.
+The calling application's `EGATE_HOST` is the gateway's base URL. On the egate server, the setting with the same name controls the listen address. The repository's [EGATE.md](EGATE.md) is the guide template embedded in the egate binary.
 
 ## Provider migration
 

@@ -16,6 +16,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,7 +31,7 @@ import (
 var templateFiles embed.FS
 
 //go:embed EGATE.md
-var sdkGuide string
+var agentGuide string
 
 type config struct {
 	DB, Username, Password, ResendKey, Host, Listen string
@@ -59,13 +60,13 @@ type pageData struct {
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "teach" {
 		if len(os.Args) != 3 {
-			fmt.Fprintln(os.Stderr, "usage: egate teach PATH")
+			fmt.Fprintln(os.Stderr, "usage: egate teach HOST_URL")
 			os.Exit(2)
 		}
 		if err := teach(os.Args[2]); err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("wrote egate integration guide to %s", os.Args[2])
+		log.Printf("wrote egate integration guide to ./EGATE.md")
 		return
 	}
 	flag.Usage = func() { printHelp(flag.CommandLine.Output()) }
@@ -130,7 +131,7 @@ func printHelp(w io.Writer) {
 
 USAGE
   egate help
-  egate teach PATH
+  egate teach HOST_URL
   egate --init-env PATH
   egate --env PATH
 
@@ -147,11 +148,11 @@ QUICK START
      and find their keys and email endpoint.
 
 TEACH AN AGENT
-  Write the egate integration guide into another repository:
-       egate teach ./EGATE.md
+  Write the egate integration guide into the current directory:
+       egate teach https://egate.example.com
 
-  Running the command again replaces the guide with the version shipped in
-  the current egate binary.
+  The command requires the gateway's base URL and writes ./EGATE.md. Running
+  it again replaces the file. The calling app also needs its own EGATE_API_KEY.
 
 OPTIONS
   --init-env PATH  Create a starter environment file and exit.
@@ -184,12 +185,15 @@ NOTES
 `)
 }
 
-func teach(path string) error {
-	if strings.TrimSpace(path) == "" {
-		return errors.New("guide path is required")
+func teach(host string) error {
+	u, err := url.Parse(host)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("host must be an absolute http or https base URL without a path, query, or fragment")
 	}
-	if err := os.WriteFile(path, []byte(sdkGuide), 0644); err != nil {
-		return fmt.Errorf("write SDK guide: %w", err)
+	host = strings.TrimRight(u.String(), "/")
+	guide := strings.ReplaceAll(agentGuide, "{EGATE_HOST}", host)
+	if err := os.WriteFile("EGATE.md", []byte(guide), 0644); err != nil {
+		return fmt.Errorf("write EGATE.md: %w", err)
 	}
 	return nil
 }
