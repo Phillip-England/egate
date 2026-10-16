@@ -51,7 +51,15 @@ The gateway passes through Resend’s HTTP status and response body. Five failed
 
 ## Agent integration guide
 
-In the calling application's directory, run `egate teach https://egate.englandsoftware.com noreply@englandsoftware.com` (or use your own gateway URL and sender address). The sender address must be on a domain verified in the gateway's Resend account. This creates or replaces `./EGATE.md` with the host, sender, endpoint, authentication, request format, response handling, and integration instructions. The calling application still needs its own `EGATE_API_KEY` from a registered app. It sends mail with a normal HTTP client; no egate SDK is required.
+First register the calling application at `/admin` and copy its one-time `eg_...` key. In the calling application's directory, run:
+
+```sh
+egate teach https://egate.englandsoftware.com noreply@englandsoftware.com eg_YOUR_APP_KEY .env
+```
+
+Replace the URL, sender, key, and `.env` path with your values. The sender address must be on a domain verified in the gateway's Resend account. The command creates or replaces `./EGATE.md` with the integration instructions and writes `EGATE_API_KEY` to the specified environment file. It creates the file and parent directories when needed, preserves other entries, replaces any existing `EGATE_API_KEY` entries, and makes the resulting file readable only by its owner. Load the file in the calling application's server process and keep it out of source control. The key is passed as a command argument, so use care with terminal history and process listings. No egate SDK is required.
+
+The earlier `egate teach HOST_URL SENDER_EMAIL` form still writes only `./EGATE.md`; you must configure `EGATE_API_KEY` yourself with that form.
 
 The calling application's `EGATE_HOST` is the gateway's base URL. On the egate server, the setting with the same name controls the listen address. The repository's [EGATE.md](EGATE.md) is the guide template embedded in the egate binary.
 
