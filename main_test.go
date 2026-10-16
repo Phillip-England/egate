@@ -23,7 +23,7 @@ func TestHelpIsClearAndActionable(t *testing.T) {
 	help := out.String()
 	for _, want := range []string{
 		"egate --init-env config/.env",
-		"egate teach https://egate.example.com noreply@example.com eg_APP_KEY .env",
+		"egate teach https://egate.example.com noreply@example.com",
 		"writes ./EGATE.md",
 		"By default, read process environment",
 		"EGATE_RESEND_API_KEY",
@@ -68,9 +68,6 @@ func TestTeachWritesAgentGuide(t *testing.T) {
 	if strings.Contains(guide, "{EGATE_HOST}") || strings.Contains(guide, "{EGATE_SENDER_EMAIL}") || strings.Contains(guide, "github.com/englandsystems/egate/sdk") {
 		t.Fatal("guide contains an unresolved placeholder or SDK dependency")
 	}
-	if !strings.Contains(guide, "Set `EGATE_API_KEY`") || strings.Contains(guide, "{EGATE_KEY_STATUS}") {
-		t.Fatal("guide does not explain how to configure the app key")
-	}
 
 	if err := os.WriteFile("EGATE.md", []byte("stale"), 0644); err != nil {
 		t.Fatal(err)
@@ -84,71 +81,6 @@ func TestTeachWritesAgentGuide(t *testing.T) {
 	}
 	if string(b) != guide {
 		t.Fatal("teach did not replace an existing guide")
-	}
-}
-
-func TestTeachWritesAppKeyToEnv(t *testing.T) {
-	t.Chdir(t.TempDir())
-	path := filepath.Join("config", ".env")
-	if err := teach("https://egate.example.com", "noreply@example.com", "eg_first", path); err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(b) != "EGATE_API_KEY=eg_first\n" {
-		t.Fatalf("unexpected new environment file: %q", b)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Fatalf("environment file permissions = %o, want 600", info.Mode().Perm())
-	}
-	guide, err := os.ReadFile("EGATE.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(guide), "has saved `EGATE_API_KEY`") || strings.Contains(string(guide), "eg_first") {
-		t.Fatal("guide must describe the saved key without exposing it")
-	}
-
-	if err := os.WriteFile(path, []byte("# Existing settings\nOTHER=value\nexport EGATE_API_KEY=eg_old\nEGATE_API_KEY=eg_duplicate\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := teach("https://egate.example.com", "noreply@example.com", "eg_second", path); err != nil {
-		t.Fatal(err)
-	}
-	b, err = os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(b) != "# Existing settings\nOTHER=value\nEGATE_API_KEY=eg_second\n" {
-		t.Fatalf("unexpected updated environment file: %q", b)
-	}
-	info, err = os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Fatalf("updated environment file permissions = %o, want 600", info.Mode().Perm())
-	}
-}
-
-func TestTeachRejectsInvalidKeyAndPathWithoutWriting(t *testing.T) {
-	t.Chdir(t.TempDir())
-	for _, args := range [][]string{{"eg_only"}, {"bad_key", ".env"}, {"eg_bad\nINJECTED=yes", ".env"}, {"eg_valid", ""}} {
-		if err := teach("https://egate.example.com", "noreply@example.com", args...); err == nil {
-			t.Errorf("teach accepted invalid credentials %q", args)
-		}
-	}
-	if _, err := os.Stat("EGATE.md"); !os.IsNotExist(err) {
-		t.Fatalf("invalid credentials created EGATE.md: %v", err)
-	}
-	if _, err := os.Stat(".env"); !os.IsNotExist(err) {
-		t.Fatalf("invalid credentials created .env: %v", err)
 	}
 }
 

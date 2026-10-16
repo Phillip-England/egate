@@ -60,18 +60,14 @@ type pageData struct {
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "teach" {
-		if len(os.Args) != 4 && len(os.Args) != 6 {
-			fmt.Fprintln(os.Stderr, "usage: egate teach HOST_URL SENDER_EMAIL [APP_API_KEY ENV_PATH]")
+		if len(os.Args) != 4 {
+			fmt.Fprintln(os.Stderr, "usage: egate teach HOST_URL SENDER_EMAIL")
 			os.Exit(2)
 		}
-		if err := teach(os.Args[2], os.Args[3], os.Args[4:]...); err != nil {
+		if err := teach(os.Args[2], os.Args[3]); err != nil {
 			log.Fatal(err)
 		}
-		if len(os.Args) == 6 {
-			log.Printf("wrote egate integration guide to ./EGATE.md and EGATE_API_KEY to %s", os.Args[5])
-		} else {
-			log.Printf("wrote egate integration guide to ./EGATE.md")
-		}
+		log.Printf("wrote egate integration guide to ./EGATE.md")
 		return
 	}
 	flag.Usage = func() { printHelp(flag.CommandLine.Output()) }
@@ -136,7 +132,7 @@ func printHelp(w io.Writer) {
 
 USAGE
   egate help
-  egate teach HOST_URL SENDER_EMAIL [APP_API_KEY ENV_PATH]
+  egate teach HOST_URL SENDER_EMAIL
   egate --init-env PATH
   egate --env PATH
 
@@ -154,13 +150,11 @@ QUICK START
 
 TEACH AN AGENT
   Write the egate integration guide into the current directory:
-       egate teach https://egate.example.com noreply@example.com eg_APP_KEY .env
+       egate teach https://egate.example.com noreply@example.com
 
-  The sender email must be on a domain verified in Resend. The app key comes
-  from a registered app in the egate admin page. The command writes ./EGATE.md
-  and sets EGATE_API_KEY in ENV_PATH, creating the file if needed. Existing
-  environment entries are preserved; an existing EGATE_API_KEY is replaced.
-  Running teach without APP_API_KEY and ENV_PATH only writes the guide.
+  The command requires the gateway's base URL and a sender email on a domain
+  verified in Resend. It writes ./EGATE.md; running it again replaces the file.
+  The calling app also needs its own EGATE_API_KEY.
 
 OPTIONS
   --init-env PATH  Create a starter environment file and exit.
@@ -193,10 +187,7 @@ NOTES
 `)
 }
 
-func teach(host, sender string, credentials ...string) error {
-	if len(credentials) != 0 && len(credentials) != 2 {
-		return errors.New("teach requires both APP_API_KEY and ENV_PATH")
-	}
+func teach(host, sender string) error {
 	u, err := url.Parse(host)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("host must be an absolute http or https base URL without a path, query, or fragment")
@@ -208,73 +199,8 @@ func teach(host, sender string, credentials ...string) error {
 	host = strings.TrimRight(u.String(), "/")
 	guide := strings.ReplaceAll(agentGuide, "{EGATE_HOST}", host)
 	guide = strings.ReplaceAll(guide, "{EGATE_SENDER_EMAIL}", sender)
-	keyStatus := "Set `EGATE_API_KEY` to the registered app key in the calling application's server-side secret storage."
-	if len(credentials) == 2 {
-		if err := writeAppKeyEnv(credentials[1], credentials[0]); err != nil {
-			return err
-		}
-		keyStatus = "`egate teach` has saved `EGATE_API_KEY` in the environment file you supplied. Load that file in the calling application's server process."
-	}
-	guide = strings.ReplaceAll(guide, "{EGATE_KEY_STATUS}", keyStatus)
 	if err := os.WriteFile("EGATE.md", []byte(guide), 0644); err != nil {
 		return fmt.Errorf("write EGATE.md: %w", err)
-	}
-	return nil
-}
-
-func writeAppKeyEnv(path, key string) error {
-	if !strings.HasPrefix(key, "eg_") || len(key) <= len("eg_") || strings.Trim(key[len("eg_"):], "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != "" {
-		return errors.New("APP_API_KEY must be a single eg_ app key")
-	}
-	if strings.TrimSpace(path) == "" {
-		return errors.New("ENV_PATH is required")
-	}
-	var contents string
-	info, err := os.Lstat(path)
-	if err == nil {
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("environment path must be a regular file: %s", path)
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read environment file: %w", err)
-		}
-		contents = string(b)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect environment file: %w", err)
-	}
-	var lines []string
-	for _, line := range strings.Split(contents, "\n") {
-		trimmed := strings.TrimSpace(line)
-		trimmed = strings.TrimPrefix(trimmed, "export ")
-		name, _, hasValue := strings.Cut(trimmed, "=")
-		if hasValue && strings.TrimSpace(name) == "EGATE_API_KEY" {
-			continue
-		}
-		lines = append(lines, line)
-	}
-	contents = strings.TrimRight(strings.Join(lines, "\n"), "\n")
-	if contents != "" {
-		contents += "\n"
-	}
-	contents += "EGATE_API_KEY=" + key + "\n"
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return fmt.Errorf("create environment directory: %w", err)
-	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".egate-env-*")
-	if err != nil {
-		return fmt.Errorf("create temporary environment file: %w", err)
-	}
-	defer os.Remove(f.Name())
-	if _, err := io.WriteString(f, contents); err != nil {
-		f.Close()
-		return fmt.Errorf("write environment file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close environment file: %w", err)
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return fmt.Errorf("replace environment file: %w", err)
 	}
 	return nil
 }

@@ -11,7 +11,7 @@ egate is an HTTP email gateway. Use the HTTP API directly with your application'
 
 An egate administrator signs in at `{EGATE_HOST}/login`, registers this application under **Apps**, and gives you its `eg_...` app key. The key is displayed only once. If it is lost or revoked, register a replacement app and update the calling application's secret.
 
-Set `EGATE_HOST={EGATE_HOST}` in the calling application's server-side configuration. {EGATE_KEY_STATUS} Never commit, log, or expose the key to browser code. These variables belong to the calling application. On the egate server, `EGATE_HOST` is a separate setting for its listen address.
+Set `EGATE_HOST={EGATE_HOST}` in the calling application's server-side configuration and set `EGATE_API_KEY` to its registered app key in server-side secret storage. The host is supplied by this guide; the key must still be established for this application. Never commit, log, or expose the key to browser code. These variables belong to the calling application. On the egate server, `EGATE_HOST` is a separate setting for its listen address.
 
 ## Send an email
 
@@ -54,4 +54,4 @@ The gateway accepts one JSON object per request, with a maximum request body of 
 
 ## Instructions for a coding assistant
 
-Inspect the application's existing email events and configuration. Load `EGATE_API_KEY` as a server-side secret and set `EGATE_HOST` to the base URL above. Set the `from` field to `{EGATE_SENDER_EMAIL}` for every email; a display name may be added. Send each email using the application's standard HTTP client and the contract in this document. Preserve the existing email content and error handling expectations. Keep credentials out of source control and client bundles. Test against a mock HTTP server rather than sending real mail. Route the application's email through egate instead of calling Resend directly.
+Inspect the application's existing email events and configuration. Add `EGATE_API_KEY` as a server-side secret and set `EGATE_HOST` to the base URL above. Set the `from` field to `{EGATE_SENDER_EMAIL}` for every email; a display name may be added. Send each email using the application's standard HTTP client and the contract in this document. Preserve the existing email content and error handling expectations. Keep credentials out of source control and client bundles. Test against a mock HTTP server rather than sending real mail. Route the application's email through egate instead of calling Resend directly.
