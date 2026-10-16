@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -42,15 +43,18 @@ type config struct {
 const defaultPort = 8119
 
 type app struct {
-	db   *sql.DB
-	cfg  config
-	tpl  *template.Template
-	http *http.Client
+	db     *sql.DB
+	cfg    config
+	tpl    *template.Template
+	http   *http.Client
+	notify chan struct{}
 }
 
 type appView struct {
 	ID                    int64
 	Name, Prefix, Created string
+	Queued, Sent, Failed  int64
+	Revoked               bool
 }
 type pageData struct {
 	Error, Message, NewKey, CSRF string
@@ -73,6 +77,7 @@ func main() {
 	flag.Usage = func() { printHelp(flag.CommandLine.Output()) }
 	envPath := flag.String("env", "", "optional environment file for local runs")
 	initEnvPath := flag.String("init-env", "", "create a starter environment file and exit")
+	workerMode := flag.Bool("worker", false, "run only the email delivery worker")
 	flag.Parse()
 	if flag.NArg() == 1 && flag.Arg(0) == "help" {
 		printHelp(os.Stdout)
@@ -120,8 +125,12 @@ func main() {
 		log.Fatal(err)
 	}
 
+	if *workerMode {
+		log.Fatal(runWorker(context.Background(), db, cfg.ResendKey, &http.Client{Timeout: 15 * time.Second}, os.Stdin))
+	}
 	tpl := template.Must(template.ParseFS(templateFiles, "templates/*.html"))
-	a := &app{db: db, cfg: cfg, tpl: tpl, http: &http.Client{Timeout: 15 * time.Second}}
+	a := &app{db: db, cfg: cfg, tpl: tpl, http: &http.Client{Timeout: 15 * time.Second}, notify: make(chan struct{}, 1)}
+	go superviseWorker(a.notify)
 	srv := &http.Server{Addr: cfg.Listen, Handler: a.routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 20 * time.Second, IdleTimeout: 60 * time.Second}
 	log.Printf("egate listening on %s", cfg.Listen)
 	log.Fatal(srv.ListenAndServe())
@@ -135,6 +144,7 @@ USAGE
   egate teach HOST_URL SENDER_EMAIL
   egate --init-env PATH
   egate --env PATH
+  egate --worker --env PATH
 
 QUICK START
   1. Create a starter configuration file:
@@ -142,7 +152,7 @@ QUICK START
 
   2. Edit config/.env and replace the starter admin password and Resend API key.
 
-  3. Start the server with the local file:
+  3. Start the server and its worker with the local file:
        egate --env config/.env
 
   4. Open http://127.0.0.1:8119 in a browser to sign in, register apps,
@@ -298,7 +308,7 @@ func readConfig() (config, error) {
 }
 
 func migrate(db *sql.DB, cfg config) error {
-	_, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+	_, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
 CREATE TABLE IF NOT EXISTS admin (id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL, password_hash TEXT NOT NULL, updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS login_failures (id INTEGER PRIMARY KEY, ip TEXT NOT NULL, attempted_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS login_failures_ip_time ON login_failures(ip, attempted_at);
@@ -308,6 +318,9 @@ CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER);
 CREATE TABLE IF NOT EXISTS apps (id INTEGER PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, prefix TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER);
 CREATE INDEX IF NOT EXISTS apps_key_hash ON apps(key_hash);
+CREATE TABLE IF NOT EXISTS email_jobs (id TEXT PRIMARY KEY, app_id INTEGER NOT NULL REFERENCES apps(id), payload BLOB NOT NULL, status TEXT NOT NULL CHECK(status IN ('queued','processing','sent','failed')), attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL, lease_until INTEGER, provider_id TEXT, last_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS email_jobs_ready ON email_jobs(status,next_attempt_at,lease_until);
+CREATE INDEX IF NOT EXISTS email_jobs_app ON email_jobs(app_id,status);
 INSERT OR IGNORE INTO apps(id,name,key_hash,prefix,created_at,revoked_at) SELECT id,name,key_hash,prefix,created_at,revoked_at FROM api_keys;`)
 	if err != nil {
 		return err
@@ -336,6 +349,7 @@ func (a *app) routes() http.Handler {
 	m.HandleFunc("POST /apps", a.requireAdmin(a.createApp))
 	m.HandleFunc("POST /apps/{id}/revoke", a.requireAdmin(a.revokeApp))
 	m.HandleFunc("POST /v1/email", a.requireAPIKey(a.sendEmail))
+	m.HandleFunc("GET /v1/email/{id}", a.requireAPIKey(a.emailStatus))
 	return securityHeaders(m)
 }
 
@@ -455,7 +469,11 @@ func (a *app) logout(w http.ResponseWriter, r *http.Request) {
 }
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 	csrf, _ := a.session(r)
-	rows, err := a.db.Query(`SELECT id,name,prefix,datetime(created_at,'unixepoch') FROM apps WHERE revoked_at IS NULL ORDER BY id DESC`)
+	rows, err := a.db.Query(`SELECT a.id,a.name,a.prefix,datetime(a.created_at,'unixepoch'),a.revoked_at IS NOT NULL,
+ (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status IN ('queued','processing')),
+ (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status='sent'),
+ (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status='failed')
+ FROM apps a ORDER BY a.id DESC`)
 	if err != nil {
 		http.Error(w, "database error", 500)
 		return
@@ -465,7 +483,7 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 	d := pageData{CSRF: csrf, BaseURL: base, EmailEndpoint: endpoint}
 	for rows.Next() {
 		var k appView
-		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.Created); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.Created, &k.Revoked, &k.Queued, &k.Sent, &k.Failed); err != nil {
 			http.Error(w, "database error", 500)
 			return
 		}
@@ -493,7 +511,11 @@ func (a *app) createApp(w http.ResponseWriter, r *http.Request) {
 	csrf, _ := a.session(r)
 	base, endpoint := gatewayURLs(r)
 	d := pageData{CSRF: csrf, BaseURL: base, EmailEndpoint: endpoint, NewKey: raw, Message: "Copy this app key now. It cannot be shown again."}
-	rows, err := a.db.Query(`SELECT id,name,prefix,datetime(created_at,'unixepoch') FROM apps WHERE revoked_at IS NULL ORDER BY id DESC`)
+	rows, err := a.db.Query(`SELECT a.id,a.name,a.prefix,datetime(a.created_at,'unixepoch'),a.revoked_at IS NOT NULL,
+ (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status IN ('queued','processing')),
+ (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status='sent'),
+ (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status='failed')
+ FROM apps a ORDER BY a.id DESC`)
 	if err != nil {
 		http.Error(w, "database error", 500)
 		return
@@ -501,7 +523,7 @@ func (a *app) createApp(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	for rows.Next() {
 		var k appView
-		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.Created); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.Created, &k.Revoked, &k.Queued, &k.Sent, &k.Failed); err != nil {
 			http.Error(w, "database error", 500)
 			return
 		}
@@ -526,6 +548,8 @@ func (a *app) revokeApp(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin", 303)
 }
 
+type appIDKey struct{}
+
 func (a *app) requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		v := r.Header.Get("Authorization")
@@ -534,13 +558,13 @@ func (a *app) requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "missing bearer token", 401)
 			return
 		}
-		var one int
-		err := a.db.QueryRow(`SELECT 1 FROM apps WHERE key_hash=? AND revoked_at IS NULL`, hash(raw)).Scan(&one)
+		var id int64
+		err := a.db.QueryRow(`SELECT id FROM apps WHERE key_hash=? AND revoked_at IS NULL`, hash(raw)).Scan(&id)
 		if err != nil {
 			http.Error(w, "invalid API key", 401)
 			return
 		}
-		next(w, r)
+		next(w, r.WithContext(context.WithValue(r.Context(), appIDKey{}, id)))
 	}
 }
 
@@ -584,24 +608,43 @@ func (a *app) sendEmail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not encode email", 500)
 		return
 	}
-	req, err := http.NewRequestWithContext(r.Context(), "POST", "https://api.resend.com/emails", strings.NewReader(string(b)))
+	id := token(24)
+	now := time.Now().Unix()
+	_, err = a.db.ExecContext(r.Context(), `INSERT INTO email_jobs(id,app_id,payload,status,next_attempt_at,created_at,updated_at) VALUES(?,?,?,'queued',?,?,?)`, id, r.Context().Value(appIDKey{}).(int64), b, now, now, now)
 	if err != nil {
-		http.Error(w, "could not create provider request", 500)
+		http.Error(w, "could not queue email", 503)
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+a.cfg.ResendKey)
-	resp, err := a.http.Do(req)
-	if err != nil {
-		http.Error(w, "email provider unavailable", 502)
-		return
+	if a.notify != nil {
+		select {
+		case a.notify <- struct{}{}:
+		default:
+		}
 	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	w.Write(out)
+	w.Header().Set("Location", "/v1/email/"+id)
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"id": id, "status": "queued"})
+}
+
+func (a *app) emailStatus(w http.ResponseWriter, r *http.Request) {
+	var status string
+	var attempts int
+	var providerID, lastError sql.NullString
+	err := a.db.QueryRowContext(r.Context(), `SELECT status,attempts,provider_id,last_error FROM email_jobs WHERE id=? AND app_id=?`, r.PathValue("id"), r.Context().Value(appIDKey{}).(int64)).Scan(&status, &attempts, &providerID, &lastError)
+	if err != nil {
+		http.Error(w, "email not found", 404)
+		return
+	}
+	result := map[string]any{"id": r.PathValue("id"), "status": status, "attempts": attempts}
+	if providerID.Valid {
+		result["provider_id"] = providerID.String
+	}
+	if status == "failed" && lastError.Valid {
+		result["error"] = lastError.String
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 func (a *app) render(w http.ResponseWriter, name string, d pageData) { a.renderStatus(w, name, d, 200) }
 func (a *app) renderStatus(w http.ResponseWriter, name string, d pageData, status int) {

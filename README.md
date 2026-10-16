@@ -1,6 +1,6 @@
 # egate
 
-A small HTTP email gateway backed by SQLite and Resend. Administrators sign in and register apps in a browser; each app receives a revocable key that it uses to send mail through `POST /v1/email`.
+A small HTTP email gateway backed by SQLite and Resend. Administrators sign in and register apps in a browser; each app receives a revocable key that it uses to queue mail through `POST /v1/email`. The admin page shows queued, sent, and failed email counts for each app, including revoked apps.
 
 ## Local setup
 
@@ -16,7 +16,7 @@ Edit `config/.env`: replace the starter administrator password and invalid Resen
 go run . --env config/.env
 ```
 
-Open `http://127.0.0.1:8119` to sign in and register apps at `/admin`. The admin page shows the gateway host and complete email endpoint alongside app keys. The app creates `data/main.sqlite` and its tables on startup. It also synchronizes the configured admin username and password into the database on every startup, so update `config/.env` to rotate them.
+Open `http://127.0.0.1:8119` to sign in and register apps at `/admin`. The admin page shows the gateway host and complete email endpoint alongside app keys and delivery counts. The server starts a separate worker process automatically. Both processes use the same SQLite database; the worker receives a wake-up when mail is queued and also checks the queue every second to recover after a restart. The app creates `data/main.sqlite` and its tables on startup. It also synchronizes the configured admin username and password into the database on every startup, so update `config/.env` to rotate them.
 
 The service reads process environment by default. For local runs, `--env PATH` loads a file. `schema.json` lists all supported settings. The default port is `8119`; the default bind address is `0.0.0.0`. Set `EGATE_HOST=127.0.0.1` in `config/.env` if a local run should accept only local connections.
 
@@ -47,7 +47,7 @@ curl http://127.0.0.1:8119/v1/email \
   -d '{"from":"sender@example.com","to":"recipient@example.com","subject":"Hello","text_body":"Sent through egate"}'
 ```
 
-The gateway passes through Resend’s HTTP status and response body. Five failed administrator logins from one IP in a rolling 24 hour window cause a 24 hour ban by default; `EGATE_LOGIN_MAX_ATTEMPTS` changes the threshold.
+The gateway returns `202 Accepted` with `{"id":"...","status":"queued"}` once the email is durably stored. The `Location` header points to `GET /v1/email/{id}`; call it with the same app key to check `queued`, `processing`, `sent`, or `failed` status. Only the app that queued an email can read its status. The worker retries provider connection failures, HTTP 429, and HTTP 5xx up to five attempts; other provider errors fail immediately. A process crash after Resend accepts an email but before the worker records success can cause a duplicate send, so the queue provides at-least-once delivery. Five failed administrator logins from one IP in a rolling 24 hour window cause a 24 hour ban by default; `EGATE_LOGIN_MAX_ATTEMPTS` changes the threshold.
 
 ## Agent integration guide
 

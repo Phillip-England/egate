@@ -56,7 +56,7 @@
     </section>
     <section class="admin-section">
       <h2>Registered apps</h2>
-      {{if .Apps}}<div class="table-wrap"><table><thead><tr><th>App</th><th>Key prefix</th><th>Created (UTC)</th><th></th></tr></thead><tbody>{{range .Apps}}<tr><td>{{.Name}}</td><td><code>{{.Prefix}}…</code></td><td>{{.Created}}</td><td><form class="inline" method="post" action="/apps/{{.ID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="danger">Revoke app</button></form></td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No apps yet. Register one to get a connection key.</p>{{end}}
+      {{if .Apps}}<div class="table-wrap"><table><thead><tr><th>App</th><th>Key prefix</th><th>Created (UTC)</th><th>Queued</th><th>Sent</th><th>Failed</th><th></th></tr></thead><tbody>{{range .Apps}}<tr><td>{{.Name}}{{if .Revoked}} <span class="muted">(revoked)</span>{{end}}</td><td><code>{{.Prefix}}…</code></td><td>{{.Created}}</td><td>{{.Queued}}</td><td>{{.Sent}}</td><td>{{.Failed}}</td><td>{{if not .Revoked}}<form class="inline" method="post" action="/apps/{{.ID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="danger">Revoke app</button></form>{{end}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No apps yet. Register one to get a connection key.</p>{{end}}
     </section>
   </main>
 </body>

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"html/template"
@@ -59,7 +60,7 @@ func TestTeachWritesAgentGuide(t *testing.T) {
 		"text_body",
 		"html_body",
 		"401",
-		"502",
+		"503",
 	} {
 		if !strings.Contains(guide, want) {
 			t.Errorf("guide is missing %q", want)
@@ -275,6 +276,19 @@ func TestRootLeadsToAdmin(t *testing.T) {
 
 func TestAdminShowsConnectionURLs(t *testing.T) {
 	a := testApp(t, 5)
+	result, err := a.db.Exec(`INSERT INTO apps(name,key_hash,prefix,created_at) VALUES(?,?,?,?)`, "Reporting App", hash("eg_report"), "eg_report", time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	appID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{"queued", "sent", "sent", "failed"} {
+		if _, err := a.db.Exec(`INSERT INTO email_jobs(id,app_id,payload,status,next_attempt_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, token(12), appID, []byte(`{}`), status, time.Now().Unix(), time.Now().Unix(), time.Now().Unix()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	rawSession, csrf := token(32), token(24)
 	if _, err := a.db.Exec(`INSERT INTO sessions(token_hash,csrf_token,expires_at) VALUES(?,?,?)`, hash(rawSession), csrf, time.Now().Add(time.Hour).Unix()); err != nil {
 		t.Fatal(err)
@@ -287,7 +301,7 @@ func TestAdminShowsConnectionURLs(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	for _, want := range []string{"Host (EGATE_HOST)", "https://egate.example.com", "POST https://egate.example.com/v1/email", "EGATE_API_KEY"} {
+	for _, want := range []string{"Host (EGATE_HOST)", "https://egate.example.com", "POST https://egate.example.com/v1/email", "EGATE_API_KEY", "Reporting App", "<td>1</td><td>2</td><td>1</td>"} {
 		if !strings.Contains(w.Body.String(), want) {
 			t.Errorf("admin page is missing %q", want)
 		}
@@ -410,8 +424,93 @@ func TestSendEmailMapsToResend(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer "+raw)
 	w := httptest.NewRecorder()
 	a.routes().ServeHTTP(w, r)
-	if !called || w.Code != 200 || w.Body.String() != `{"id":"email_123"}` {
+	if called || w.Code != http.StatusAccepted {
 		t.Fatalf("called=%v status=%d body=%s", called, w.Code, w.Body.String())
+	}
+	var accepted struct{ ID, Status string }
+	if err := json.Unmarshal(w.Body.Bytes(), &accepted); err != nil || accepted.ID == "" || accepted.Status != "queued" {
+		t.Fatalf("accepted=%+v err=%v", accepted, err)
+	}
+	job, err := claimEmail(context.Background(), a.db)
+	if err != nil || job == nil || job.id != accepted.ID {
+		t.Fatalf("claim=%+v err=%v", job, err)
+	}
+	if err := deliverEmail(context.Background(), a.db, a.cfg.ResendKey, a.http, *job); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("worker did not call provider")
+	}
+	status := httptest.NewRecorder()
+	lookup := httptest.NewRequest("GET", "/v1/email/"+accepted.ID, nil)
+	lookup.Header.Set("Authorization", "Bearer "+raw)
+	a.routes().ServeHTTP(status, lookup)
+	if status.Code != 200 || !strings.Contains(status.Body.String(), `"status":"sent"`) || !strings.Contains(status.Body.String(), `"provider_id":"email_123"`) {
+		t.Fatalf("status=%d body=%s", status.Code, status.Body.String())
+	}
+}
+
+func TestEmailRetryAndAppIsolation(t *testing.T) {
+	a := testApp(t, 5)
+	for _, key := range []string{"eg_one", "eg_two"} {
+		if _, err := a.db.Exec(`INSERT INTO apps(name,key_hash,prefix,created_at) VALUES(?,?,?,?)`, key, hash(key), key, time.Now().Unix()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := httptest.NewRequest("POST", "/v1/email", strings.NewReader(`{"from":"a@example.com","to":"b@example.com","subject":"Hi","text_body":"Hello"}`))
+	req.Header.Set("Authorization", "Bearer eg_one")
+	w := httptest.NewRecorder()
+	a.routes().ServeHTTP(w, req)
+	if w.Code != 202 {
+		t.Fatalf("queue status=%d: %s", w.Code, w.Body.String())
+	}
+	var accepted struct{ ID string }
+	if err := json.Unmarshal(w.Body.Bytes(), &accepted); err != nil {
+		t.Fatal(err)
+	}
+	lookup := httptest.NewRequest("GET", "/v1/email/"+accepted.ID, nil)
+	lookup.Header.Set("Authorization", "Bearer eg_two")
+	w = httptest.NewRecorder()
+	a.routes().ServeHTTP(w, lookup)
+	if w.Code != 404 {
+		t.Fatalf("other app status=%d", w.Code)
+	}
+	job, err := claimEmail(context.Background(), a.db)
+	if err != nil || job == nil {
+		t.Fatalf("claim=%+v err=%v", job, err)
+	}
+	a.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 503, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	if err := deliverEmail(context.Background(), a.db, a.cfg.ResendKey, a.http, *job); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var attempts int
+	if err := a.db.QueryRow(`SELECT status,attempts FROM email_jobs WHERE id=?`, accepted.ID).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "queued" || attempts != 1 {
+		t.Fatalf("after retry status=%s attempts=%d", status, attempts)
+	}
+	if _, err := a.db.Exec(`UPDATE email_jobs SET next_attempt_at=? WHERE id=?`, time.Now().Unix(), accepted.ID); err != nil {
+		t.Fatal(err)
+	}
+	job, err = claimEmail(context.Background(), a.db)
+	if err != nil || job == nil || job.attempts != 2 {
+		t.Fatalf("second claim=%+v err=%v", job, err)
+	}
+	a.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 400, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	})}
+	if err := deliverEmail(context.Background(), a.db, a.cfg.ResendKey, a.http, *job); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow(`SELECT status FROM email_jobs WHERE id=?`, accepted.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" {
+		t.Fatalf("permanent failure status=%s", status)
 	}
 }
 

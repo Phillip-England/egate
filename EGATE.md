@@ -50,7 +50,7 @@ curl '{EGATE_HOST}/v1/email' \
   }'
 ```
 
-The gateway accepts one JSON object per request, with a maximum request body of 1 MiB. It returns the email provider's HTTP status and JSON body on a successful provider request, typically including an `id`. An invalid JSON body or missing required field returns `400`; a missing, invalid, or revoked app key returns `401`; a provider connection failure returns `502`. Other provider error statuses and bodies pass through. Treat every non-2xx status as a failed send. Do not show raw provider errors to end users. Set a request timeout and avoid automatic retries after an uncertain result, which could duplicate an email.
+The gateway accepts one JSON object per request, with a maximum request body of 1 MiB. It returns `202 Accepted` and JSON such as `{"id":"...","status":"queued"}` after storing the email. This confirms queue acceptance, not delivery. The `Location` header points to `GET /v1/email/{id}`; send the same bearer key to read its `queued`, `processing`, `sent`, or `failed` status. A sent response includes `provider_id` when Resend supplies one; a failed response includes `error`. An invalid JSON body or missing required field returns `400`; a missing, invalid, or revoked app key returns `401`; a queue storage failure returns `503`. Treat every non-2xx response as a failed queue request. Set a request timeout and avoid blindly retrying after an uncertain response, which could queue a duplicate email. The worker retries temporary provider failures; a crash after provider acceptance can still cause a duplicate delivery.
 
 ## Instructions for a coding assistant
 
