@@ -424,15 +424,19 @@ func TestSendEmailMapsToResend(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer "+raw)
 	w := httptest.NewRecorder()
 	a.routes().ServeHTTP(w, r)
-	if called || w.Code != http.StatusAccepted {
+	if called || w.Code != http.StatusOK {
 		t.Fatalf("called=%v status=%d body=%s", called, w.Code, w.Body.String())
 	}
-	var accepted struct{ ID, Status string }
-	if err := json.Unmarshal(w.Body.Bytes(), &accepted); err != nil || accepted.ID == "" || accepted.Status != "queued" {
+	var accepted struct{ Status string }
+	if err := json.Unmarshal(w.Body.Bytes(), &accepted); err != nil || accepted.Status != "accepted" {
 		t.Fatalf("accepted=%+v err=%v", accepted, err)
 	}
+	var jobID string
+	if err := a.db.QueryRow(`SELECT id FROM email_jobs ORDER BY created_at DESC LIMIT 1`).Scan(&jobID); err != nil {
+		t.Fatal(err)
+	}
 	job, err := claimEmail(context.Background(), a.db)
-	if err != nil || job == nil || job.id != accepted.ID {
+	if err != nil || job == nil || job.id != jobID {
 		t.Fatalf("claim=%+v err=%v", job, err)
 	}
 	if err := deliverEmail(context.Background(), a.db, a.cfg.ResendKey, a.http, *job); err != nil {
@@ -442,7 +446,7 @@ func TestSendEmailMapsToResend(t *testing.T) {
 		t.Fatal("worker did not call provider")
 	}
 	status := httptest.NewRecorder()
-	lookup := httptest.NewRequest("GET", "/v1/email/"+accepted.ID, nil)
+	lookup := httptest.NewRequest("GET", "/v1/email/"+jobID, nil)
 	lookup.Header.Set("Authorization", "Bearer "+raw)
 	a.routes().ServeHTTP(status, lookup)
 	if status.Code != 200 || !strings.Contains(status.Body.String(), `"status":"sent"`) || !strings.Contains(status.Body.String(), `"provider_id":"email_123"`) {
@@ -461,14 +465,14 @@ func TestEmailRetryAndAppIsolation(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer eg_one")
 	w := httptest.NewRecorder()
 	a.routes().ServeHTTP(w, req)
-	if w.Code != 202 {
+	if w.Code != 200 {
 		t.Fatalf("queue status=%d: %s", w.Code, w.Body.String())
 	}
-	var accepted struct{ ID string }
-	if err := json.Unmarshal(w.Body.Bytes(), &accepted); err != nil {
+	var jobID string
+	if err := a.db.QueryRow(`SELECT id FROM email_jobs ORDER BY created_at DESC LIMIT 1`).Scan(&jobID); err != nil {
 		t.Fatal(err)
 	}
-	lookup := httptest.NewRequest("GET", "/v1/email/"+accepted.ID, nil)
+	lookup := httptest.NewRequest("GET", "/v1/email/"+jobID, nil)
 	lookup.Header.Set("Authorization", "Bearer eg_two")
 	w = httptest.NewRecorder()
 	a.routes().ServeHTTP(w, lookup)
@@ -487,13 +491,13 @@ func TestEmailRetryAndAppIsolation(t *testing.T) {
 	}
 	var status string
 	var attempts int
-	if err := a.db.QueryRow(`SELECT status,attempts FROM email_jobs WHERE id=?`, accepted.ID).Scan(&status, &attempts); err != nil {
+	if err := a.db.QueryRow(`SELECT status,attempts FROM email_jobs WHERE id=?`, jobID).Scan(&status, &attempts); err != nil {
 		t.Fatal(err)
 	}
 	if status != "queued" || attempts != 1 {
 		t.Fatalf("after retry status=%s attempts=%d", status, attempts)
 	}
-	if _, err := a.db.Exec(`UPDATE email_jobs SET next_attempt_at=? WHERE id=?`, time.Now().Unix(), accepted.ID); err != nil {
+	if _, err := a.db.Exec(`UPDATE email_jobs SET next_attempt_at=? WHERE id=?`, time.Now().Unix(), jobID); err != nil {
 		t.Fatal(err)
 	}
 	job, err = claimEmail(context.Background(), a.db)
@@ -506,7 +510,7 @@ func TestEmailRetryAndAppIsolation(t *testing.T) {
 	if err := deliverEmail(context.Background(), a.db, a.cfg.ResendKey, a.http, *job); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.db.QueryRow(`SELECT status FROM email_jobs WHERE id=?`, accepted.ID).Scan(&status); err != nil {
+	if err := a.db.QueryRow(`SELECT status FROM email_jobs WHERE id=?`, jobID).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
 	if status != "failed" {
@@ -542,5 +546,89 @@ func TestLegacyKeyMigratesToApp(t *testing.T) {
 	h(w, r)
 	if w.Code != 401 {
 		t.Fatalf("revoked key status=%d", w.Code)
+	}
+}
+
+func TestAppEmailLimitJailReleaseAndRetention(t *testing.T) {
+	a := testApp(t, 5)
+	for _, key := range []string{"eg_one", "eg_two"} {
+		if _, err := a.db.Exec(`INSERT INTO apps(name,key_hash,prefix,created_at,daily_limit) VALUES(?,?,?,?,?)`, key, hash(key), key, time.Now().Unix(), 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send := func(key, ip string) int {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/email", strings.NewReader(`{"from":"a@example.com","to":"b@example.com","subject":"Hi","text_body":"Hello"}`))
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("X-Egate-Client-IP", ip)
+		w := httptest.NewRecorder()
+		a.routes().ServeHTTP(w, req)
+		if w.Code != 200 || w.Body.String() != "{\"status\":\"accepted\"}\n" {
+			t.Fatalf("response %d: %s", w.Code, w.Body.String())
+		}
+		return w.Code
+	}
+	for i := 0; i < 4; i++ {
+		send("eg_one", "192.0.2.10")
+	}
+	send("eg_one", "192.0.2.11")
+	send("eg_two", "192.0.2.10")
+	var jobs, jails int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM email_jobs`).Scan(&jobs); err != nil || jobs != 4 {
+		t.Fatalf("jobs=%d err=%v", jobs, err)
+	}
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM email_jail`).Scan(&jails); err != nil || jails != 1 {
+		t.Fatalf("jails=%d err=%v", jails, err)
+	}
+	var id int64
+	if err := a.db.QueryRow(`SELECT id FROM apps WHERE name='eg_one'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	session, csrf := token(32), token(24)
+	if _, err := a.db.Exec(`INSERT INTO sessions(token_hash,csrf_token,expires_at) VALUES(?,?,?)`, hash(session), csrf, time.Now().Add(time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	dashboard := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	dashboard.AddCookie(&http.Cookie{Name: "egate_session", Value: session})
+	page := httptest.NewRecorder()
+	a.routes().ServeHTTP(page, dashboard)
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "192.0.2.10") || !strings.Contains(page.Body.String(), "Email jail") {
+		t.Fatalf("jail absent from dashboard: %d", page.Code)
+	}
+	form := url.Values{"csrf": {csrf}, "app_id": {strconv.FormatInt(id, 10)}, "ip": {"192.0.2.10"}}
+	req := httptest.NewRequest(http.MethodPost, "/jail/release", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "egate_session", Value: session})
+	w := httptest.NewRecorder()
+	a.routes().ServeHTTP(w, req)
+	if w.Code != 303 {
+		t.Fatalf("release status=%d", w.Code)
+	}
+	limitForm := url.Values{"csrf": {csrf}, "daily_limit": {"1"}}
+	limitRequest := httptest.NewRequest(http.MethodPost, "/apps/"+strconv.FormatInt(id, 10)+"/limit", strings.NewReader(limitForm.Encode()))
+	limitRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	limitRequest.AddCookie(&http.Cookie{Name: "egate_session", Value: session})
+	limitResult := httptest.NewRecorder()
+	a.routes().ServeHTTP(limitResult, limitRequest)
+	var configuredLimit int
+	if err := a.db.QueryRow(`SELECT daily_limit FROM apps WHERE id=?`, id).Scan(&configuredLimit); err != nil || limitResult.Code != 303 || configuredLimit != 1 {
+		t.Fatalf("app limit: status=%d limit=%d err=%v", limitResult.Code, configuredLimit, err)
+	}
+	send("eg_one", "192.0.2.10")
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM email_jobs`).Scan(&jobs); err != nil || jobs != 5 {
+		t.Fatalf("jobs after release=%d err=%v", jobs, err)
+	}
+	old := time.Now().Add(-25 * time.Hour).Unix()
+	if _, err := a.db.Exec(`UPDATE email_jobs SET created_at=?; UPDATE email_submissions SET created_at=?; UPDATE email_jail SET banned_until=?`, old, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupEmailData(a.db, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"email_jobs", "email_submissions", "email_jail"} {
+		var n int
+		if err := a.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("%s retained %d rows: %v", table, n, err)
+		}
 	}
 }

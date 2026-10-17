@@ -56,7 +56,12 @@
     </section>
     <section class="admin-section">
       <h2>Registered apps</h2>
-      {{if .Apps}}<div class="table-wrap"><table><thead><tr><th>App</th><th>Key prefix</th><th>Created (UTC)</th><th>Queued</th><th>Sent</th><th>Failed</th><th></th></tr></thead><tbody>{{range .Apps}}<tr><td>{{.Name}}{{if .Revoked}} <span class="muted">(revoked)</span>{{end}}</td><td><code>{{.Prefix}}…</code></td><td>{{.Created}}</td><td>{{.Queued}}</td><td>{{.Sent}}</td><td>{{.Failed}}</td><td>{{if not .Revoked}}<form class="inline" method="post" action="/apps/{{.ID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="danger">Revoke app</button></form>{{end}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No apps yet. Register one to get a connection key.</p>{{end}}
+      {{if .Apps}}<div class="table-wrap"><table><thead><tr><th>App</th><th>Key prefix</th><th>Created (UTC)</th><th>Queued</th><th>Sent</th><th>Failed</th><th>Per IP / 24h</th><th></th></tr></thead><tbody>{{range .Apps}}<tr><td>{{.Name}}{{if .Revoked}} <span class="muted">(revoked)</span>{{end}}</td><td><code>{{.Prefix}}…</code></td><td>{{.Created}}</td><td>{{.Queued}}</td><td>{{.Sent}}</td><td>{{.Failed}}</td><td><form class="inline" method="post" action="/apps/{{.ID}}/limit"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="number" name="daily_limit" min="0" max="100000" value="{{.DailyLimit}}" aria-label="Daily email limit for {{.Name}}" style="width:6em"><button>Save</button></form><small class="muted">0 = unlimited</small></td><td>{{if not .Revoked}}<form class="inline" method="post" action="/apps/{{.ID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="danger">Revoke app</button></form>{{end}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No apps yet. Register one to get a connection key.</p>{{end}}
+    </section>
+    <section class="admin-section">
+      <h2>Email jail</h2>
+      <p class="muted">IPs that exceeded an app limit. Release also clears that IP's recent count for the app.</p>
+      {{if .Jails}}<div class="table-wrap"><table><thead><tr><th>App</th><th>IP address</th><th>Until (UTC)</th><th></th></tr></thead><tbody>{{range .Jails}}<tr><td>{{.AppName}}</td><td><code>{{.IP}}</code></td><td>{{.Until}}</td><td><form method="post" action="/jail/release"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="app_id" value="{{.AppID}}"><input type="hidden" name="ip" value="{{.IP}}"><button>Release</button></form></td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No IPs jailed.</p>{{end}}
     </section>
   </main>
 </body>

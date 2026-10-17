@@ -50,7 +50,7 @@ curl '{EGATE_HOST}/v1/email' \
   }'
 ```
 
-The gateway accepts one JSON object per request, with a maximum request body of 1 MiB. It returns `202 Accepted` and JSON such as `{"id":"...","status":"queued"}` after storing the email. This confirms queue acceptance, not delivery. The `Location` header points to `GET /v1/email/{id}`; send the same bearer key to read its `queued`, `processing`, `sent`, or `failed` status. A sent response includes `provider_id` when Resend supplies one; a failed response includes `error`. An invalid JSON body or missing required field returns `400`; a missing, invalid, or revoked app key returns `401`; a queue storage failure returns `503`. Treat every non-2xx response as a failed queue request. Set a request timeout and avoid blindly retrying after an uncertain response, which could queue a duplicate email. The worker retries temporary provider failures; a crash after provider acceptance can still cause a duplicate delivery.
+The gateway accepts one JSON object per request, with a maximum body of 1 MiB. The calling app may send `X-Egate-Client-IP` with its validated visitor IP for this app's per-IP allowance. A valid request returns `200 OK` with `{"status":"accepted"}` whether the gateway queues it or silently suppresses it under the app's limit. This confirms receipt, not provider delivery. Invalid JSON or missing required fields returns `400`; a missing, invalid, or revoked app key returns `401`; a queue storage failure returns `503`. Treat non-2xx as failed acceptance. Set a timeout and investigate an uncertain response before resending, since egate may already have accepted it. Egate retries temporary provider failures and removes jobs and IP records after 24 hours.
 
 ## Instructions for a coding assistant
 

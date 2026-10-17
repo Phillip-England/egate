@@ -54,12 +54,18 @@ type appView struct {
 	ID                    int64
 	Name, Prefix, Created string
 	Queued, Sent, Failed  int64
+	DailyLimit            int
 	Revoked               bool
+}
+type jailView struct {
+	AppID              int64
+	AppName, IP, Until string
 }
 type pageData struct {
 	Error, Message, NewKey, CSRF string
 	BaseURL, EmailEndpoint       string
 	Apps                         []appView
+	Jails                        []jailView
 }
 
 func main() {
@@ -122,6 +128,10 @@ func main() {
 	db.SetMaxOpenConns(1)
 	defer db.Close()
 	if err := migrate(db, cfg); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := cleanupEmailData(db, time.Now().Unix()); err != nil {
 		log.Fatal(err)
 	}
 
@@ -321,9 +331,41 @@ CREATE INDEX IF NOT EXISTS apps_key_hash ON apps(key_hash);
 CREATE TABLE IF NOT EXISTS email_jobs (id TEXT PRIMARY KEY, app_id INTEGER NOT NULL REFERENCES apps(id), payload BLOB NOT NULL, status TEXT NOT NULL CHECK(status IN ('queued','processing','sent','failed')), attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL, lease_until INTEGER, provider_id TEXT, last_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS email_jobs_ready ON email_jobs(status,next_attempt_at,lease_until);
 CREATE INDEX IF NOT EXISTS email_jobs_app ON email_jobs(app_id,status);
+CREATE INDEX IF NOT EXISTS email_jobs_expiry ON email_jobs(created_at);
+CREATE TABLE IF NOT EXISTS email_submissions (app_id INTEGER NOT NULL, ip TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS email_submissions_window ON email_submissions(app_id,ip,created_at);
+CREATE INDEX IF NOT EXISTS email_submissions_expiry ON email_submissions(created_at);
+CREATE TABLE IF NOT EXISTS email_jail (app_id INTEGER NOT NULL, ip TEXT NOT NULL, banned_until INTEGER NOT NULL, PRIMARY KEY(app_id,ip));
 INSERT OR IGNORE INTO apps(id,name,key_hash,prefix,created_at,revoked_at) SELECT id,name,key_hash,prefix,created_at,revoked_at FROM api_keys;`)
 	if err != nil {
 		return err
+	}
+	var hasLimit bool
+	cols, err := db.Query("PRAGMA table_info(apps)")
+	if err != nil {
+		return err
+	}
+	for cols.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var def sql.NullString
+		if err = cols.Scan(&cid, &name, &typ, &notnull, &def, &pk); err != nil {
+			cols.Close()
+			return err
+		}
+		if name == "daily_limit" {
+			hasLimit = true
+		}
+	}
+	err = cols.Err()
+	cols.Close()
+	if err != nil {
+		return err
+	}
+	if !hasLimit {
+		if _, err = db.Exec("ALTER TABLE apps ADD COLUMN daily_limit INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
 	}
 	h, err := bcrypt.GenerateFromPassword([]byte(cfg.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -348,6 +390,8 @@ func (a *app) routes() http.Handler {
 	m.HandleFunc("GET /admin", a.requireAdmin(a.dashboard))
 	m.HandleFunc("POST /apps", a.requireAdmin(a.createApp))
 	m.HandleFunc("POST /apps/{id}/revoke", a.requireAdmin(a.revokeApp))
+	m.HandleFunc("POST /apps/{id}/limit", a.requireAdmin(a.setAppLimit))
+	m.HandleFunc("POST /jail/release", a.requireAdmin(a.releaseJail))
 	m.HandleFunc("POST /v1/email", a.requireAPIKey(a.sendEmail))
 	m.HandleFunc("GET /v1/email/{id}", a.requireAPIKey(a.emailStatus))
 	return securityHeaders(m)
@@ -385,6 +429,9 @@ func (a *app) cleanup() {
 	a.db.Exec(`DELETE FROM login_failures WHERE attempted_at < ?`, now-24*3600)
 	a.db.Exec(`DELETE FROM login_bans WHERE banned_until < ?`, now)
 	a.db.Exec(`DELETE FROM sessions WHERE expires_at < ?`, now)
+	if err := cleanupEmailData(a.db, now); err != nil {
+		log.Printf("email cleanup: %v", err)
+	}
 }
 
 func (a *app) loginPage(w http.ResponseWriter, r *http.Request) {
@@ -468,11 +515,12 @@ func (a *app) logout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", 303)
 }
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
+	a.cleanup()
 	csrf, _ := a.session(r)
 	rows, err := a.db.Query(`SELECT a.id,a.name,a.prefix,datetime(a.created_at,'unixepoch'),a.revoked_at IS NOT NULL,
  (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status IN ('queued','processing')),
  (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status='sent'),
- (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status='failed')
+ (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status='failed'), a.daily_limit
  FROM apps a ORDER BY a.id DESC`)
 	if err != nil {
 		http.Error(w, "database error", 500)
@@ -483,13 +531,32 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 	d := pageData{CSRF: csrf, BaseURL: base, EmailEndpoint: endpoint}
 	for rows.Next() {
 		var k appView
-		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.Created, &k.Revoked, &k.Queued, &k.Sent, &k.Failed); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.Created, &k.Revoked, &k.Queued, &k.Sent, &k.Failed, &k.DailyLimit); err != nil {
 			http.Error(w, "database error", 500)
 			return
 		}
 		d.Apps = append(d.Apps, k)
 	}
 	if err := rows.Err(); err != nil {
+		http.Error(w, "database error", 500)
+		return
+	}
+	rows.Close()
+	jails, err := a.db.Query(`SELECT j.app_id,a.name,j.ip,datetime(j.banned_until,'unixepoch') FROM email_jail j JOIN apps a ON a.id=j.app_id ORDER BY j.banned_until DESC`)
+	if err != nil {
+		http.Error(w, "database error", 500)
+		return
+	}
+	defer jails.Close()
+	for jails.Next() {
+		var jail jailView
+		if err := jails.Scan(&jail.AppID, &jail.AppName, &jail.IP, &jail.Until); err != nil {
+			http.Error(w, "database error", 500)
+			return
+		}
+		d.Jails = append(d.Jails, jail)
+	}
+	if err := jails.Err(); err != nil {
 		http.Error(w, "database error", 500)
 		return
 	}
@@ -514,7 +581,7 @@ func (a *app) createApp(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.Query(`SELECT a.id,a.name,a.prefix,datetime(a.created_at,'unixepoch'),a.revoked_at IS NOT NULL,
  (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status IN ('queued','processing')),
  (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status='sent'),
- (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status='failed')
+ (SELECT COUNT(*) FROM email_jobs j WHERE j.app_id=a.id AND j.status='failed'), a.daily_limit
  FROM apps a ORDER BY a.id DESC`)
 	if err != nil {
 		http.Error(w, "database error", 500)
@@ -523,7 +590,7 @@ func (a *app) createApp(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	for rows.Next() {
 		var k appView
-		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.Created, &k.Revoked, &k.Queued, &k.Sent, &k.Failed); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.Created, &k.Revoked, &k.Queued, &k.Sent, &k.Failed, &k.DailyLimit); err != nil {
 			http.Error(w, "database error", 500)
 			return
 		}
@@ -609,10 +676,9 @@ func (a *app) sendEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := token(24)
-	now := time.Now().Unix()
-	_, err = a.db.ExecContext(r.Context(), `INSERT INTO email_jobs(id,app_id,payload,status,next_attempt_at,created_at,updated_at) VALUES(?,?,?,'queued',?,?,?)`, id, r.Context().Value(appIDKey{}).(int64), b, now, now, now)
+	err = a.acceptEmail(r, id, b)
 	if err != nil {
-		http.Error(w, "could not queue email", 503)
+		http.Error(w, "could not accept email", 503)
 		return
 	}
 	if a.notify != nil {
@@ -622,9 +688,8 @@ func (a *app) sendEmail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Location", "/v1/email/"+id)
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]string{"id": id, "status": "queued"})
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
 }
 
 func (a *app) emailStatus(w http.ResponseWriter, r *http.Request) {

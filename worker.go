@@ -88,7 +88,14 @@ func runWorker(ctx context.Context, db *sql.DB, key string, client *http.Client,
 	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	lastCleanup := time.Now()
 	for {
+		if time.Since(lastCleanup) >= time.Hour {
+			if err := cleanupEmailData(db, time.Now().Unix()); err != nil {
+				log.Printf("email cleanup: %v", err)
+			}
+			lastCleanup = time.Now()
+		}
 		job, err := claimEmail(ctx, db)
 		if err != nil {
 			log.Printf("email claim: %v", err)
